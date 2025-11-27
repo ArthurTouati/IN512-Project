@@ -38,6 +38,10 @@ class GUI:
         key_img = pygame.image.load(img_folder + "/key.png")
         key_img = pygame.transform.scale(key_img, (self.cell_size, self.cell_size))
         self.keys = [key_img.copy() for _ in range(self.game.nb_agents)]
+        #walls
+        wall_img = pygame.image.load(img_folder + "/wall.png")
+        wall_img = pygame.transform.scale(wall_img, (self.cell_size, self.cell_size))
+        self.walls = [wall_img.copy() for _ in range(self.game.nb_agents*5)]
         #agent text number
         font = pygame.font.SysFont("Arial", self.cell_size//4, True)
         self.text_agents = [font.render(f"{i+1}", True, self.game.agents[i].color) for i in range(self.game.nb_agents)]
@@ -95,5 +99,11 @@ class GUI:
             #agents
             self.screen.blit(self.agents[i], self.agents[i].get_rect(center=(self.game.agents[i].x*self.cell_size + self.cell_size//2, self.game.agents[i].y*self.cell_size + self.cell_size//2)))
             self.screen.blit(self.text_agents[i], self.text_agents[i].get_rect(center=(self.game.agents[i].x*self.cell_size + self.cell_size-self.text_agents[i].get_width()//2, self.game.agents[i].y*self.cell_size + self.cell_size-self.text_agents[i].get_height()//2)))
+
+            for j in range(0,5):
+                #walls
+                pygame.draw.rect(self.screen, BLACK, (self.game.walls[j].x*self.cell_size, self.game.walls[j].y*self.cell_size, self.cell_size, self.cell_size), width=3)
+                self.screen.blit(self.walls[i], self.boxes[i].get_rect(topleft=(self.game.boxes[i].x*self.cell_size, self.game.boxes[i].y*self.cell_size)))
+            
 
         pygame.display.update()
