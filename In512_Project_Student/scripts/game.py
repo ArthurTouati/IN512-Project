@@ -132,7 +132,6 @@ class Key(Item):
     def __init__(self, x, y):
         Item.__init__(self, x, y, KEY_NEIGHBOUR_PERCENTAGE, "key")
     
-
 class Box(Item):
     def __init__(self, x, y):
         Item.__init__(self, x, y, BOX_NEIGHBOUR_PERCENTAGE, "box")
