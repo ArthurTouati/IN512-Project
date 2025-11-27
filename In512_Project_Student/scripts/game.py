@@ -28,7 +28,7 @@ class Game:
     
     def load_map(self, map_id):
         """ Load a map """
-        json_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "resources", "config.json")
+        json_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "resources", "config.json") 
         with open(json_filename, "r") as json_file:
             self.map_cfg = json.load(json_file)[f"map_{map_id}"]        
         
@@ -38,8 +38,9 @@ class Game:
             self.keys.append(Key(self.map_cfg[f"key_{i+1}"]["x"], self.map_cfg[f"key_{i+1}"]["y"]))
             self.boxes.append(Box(self.map_cfg[f"box_{i+1}"]["x"], self.map_cfg[f"box_{i+1}"]["y"]))
             self.agent_paths[i] = [(self.agents[i].x, self.agents[i].y)]
-            for j in range(1,6):   # 1 big wall is composed of 5 walls
-                self.walls.append(Wall(self.map_cfg[f"wall_{i+1}_{j}"]["x"], self.map_cfg[f"wall_{i+1}_{j}"]["y"]))
+            # self.walls.append(Wall(self.map_cfg[f"wall_{i+1}"]["x"], self.map_cfg[f"wall_{i+1}"]["y"]))
+            for j in range(NB_WALLS):
+                self.walls.append(Wall(self.map_cfg[f"wall_{i+1}_{j+1}"]["x"], self.map_cfg[f"wall_{i+1}_{j+1}"]["y"]))
         
         self.map_w, self.map_h = self.map_cfg["width"], self.map_cfg["height"]
         self.map_real = np.zeros(shape=(self.map_h, self.map_w))
@@ -47,24 +48,22 @@ class Game:
         items.extend(self.keys)
         items.extend(self.boxes)
         items.extend(self.walls)
-        offsets = [[(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)], [(-2, -2), (-1, -2), (0, -2), (1, -2), (2, -2), (-2, -1), (2, -1), (-2, 0), (2, 0), (-2, 1), ( 2, 1), (-2, 2), (-1, 2), (0, 2), (1, 2), (2, 2)]]
-        offsets_wall = [[(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]]
+        offsets = [[(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)], 
+                   [(-2, -2), (-1, -2), (0, -2), (1, -2), (2, -2), (-2, -1), (2, -1), (-2, 0), (2, 0), (-2, 1), ( 2, 1), (-2, 2), (-1, 2), (0, 2), (1, 2), (2, 2)]]
         for item in items:
-            if item.type in "wall":
-                for i, sub_list in enumerate(offsets_wall):
-                    for dx, dy in sub_list:
-                        if dx != 0 or dy != 0:
-                            self.add_val(item.x + dx, item.y + dy, item.neighbour_percent/(i+1))
-                        else:
-                            self.add_val(item.x, item.y, 1)
-            else:
-                for i, sub_list in enumerate(offsets):
-                    for dx, dy in sub_list:
-                        if dx != 0 or dy != 0:
-                            self.add_val(item.x + dx, item.y + dy, item.neighbour_percent/(i+1))
-                        else:
-                            self.add_val(item.x, item.y, 1)
-                            
+            if item.type == "wall":
+                for dx, dy in offsets[0]:
+                    if dx != 0 or dy != 0:
+                        self.add_val(item.x + dx, item.y + dy, item.neighbour_percent)
+                    else:
+                        self.add_val(item.x + dx, item.y + dy, 1)
+            for i, sub_list in enumerate(offsets):
+                for dx, dy in sub_list:
+                    if dx != 0 or dy != 0:
+                        self.add_val(item.x + dx, item.y + dy, item.neighbour_percent/(i+1))
+                    else:
+                        self.add_val(item.x, item.y, 1)
+
     
     def add_val(self, x, y, val):
         """ Add a value if x and y coordinates are in the range [map_w; map_h] """
@@ -98,6 +97,7 @@ class Game:
                     self.agent_paths[agent_id].append((self.agents[agent_id].x, self.agents[agent_id].y))
                     #sleep(0.5)
         return {"sender": GAME_ID, "header": MOVE, "x": self.agents[agent_id].x, "y": self.agents[agent_id].y, "cell_val": self.map_real[self.agents[agent_id].y, self.agents[agent_id].x]}
+
 
 
     def handle_item_owner_request(self, agent_id):
@@ -135,9 +135,11 @@ class Key(Item):
     def __init__(self, x, y):
         Item.__init__(self, x, y, KEY_NEIGHBOUR_PERCENTAGE, "key")
     
+
 class Box(Item):
     def __init__(self, x, y):
         Item.__init__(self, x, y, BOX_NEIGHBOUR_PERCENTAGE, "box")
+
 
 class Wall(Item):
     def __init__(self, x, y):
