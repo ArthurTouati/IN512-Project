@@ -54,21 +54,29 @@ class Game:
             if item.type == "wall":
                 for dx, dy in offsets[0]:
                     if dx != 0 or dy != 0:
-                        self.add_val(item.x + dx, item.y + dy, item.neighbour_percent)
+                        if self.get_cell_val(item.x + dx, item.y + dy) == 0:
+                            self.add_val(item.x + dx, item.y + dy, item.neighbour_percent)
                     else:
                         self.add_val(item.x + dx, item.y + dy, 1)
-            for i, sub_list in enumerate(offsets):
-                for dx, dy in sub_list:
-                    if dx != 0 or dy != 0:
-                        self.add_val(item.x + dx, item.y + dy, item.neighbour_percent/(i+1))
-                    else:
-                        self.add_val(item.x, item.y, 1)
+            else:
+                for i, sub_list in enumerate(offsets):
+                    for dx, dy in sub_list:
+                        if dx != 0 or dy != 0:
+                            self.add_val(item.x + dx, item.y + dy, item.neighbour_percent/(i+1))
+                        else:
+                            self.add_val(item.x, item.y, 1)
 
     
     def add_val(self, x, y, val):
         """ Add a value if x and y coordinates are in the range [map_w; map_h] """
         if 0 <= x < self.map_w and 0 <= y < self.map_h:
             self.map_real[y, x] = val
+    
+    def get_cell_val(self, x, y):
+        """ Get the value of a cell """
+        if 0 <= x < self.map_w and 0 <= y < self.map_h:
+            return self.map_real[y, x]
+        return 0
 
 
     def process(self, msg, agent_id):
@@ -77,7 +85,7 @@ class Game:
         if msg["header"] == MOVE:
             return self.handle_move(msg, agent_id)
         elif msg["header"] == GET_DATA:
-            return {"sender": GAME_ID, "header": GET_DATA, "agent_id" : self.agent_id, "x": self.agents[agent_id].x, "y": self.agents[agent_id].y, "w": self.map_w, "h": self.map_h, "cell_val": self.map_real[self.agents[agent_id].y, self.agents[agent_id].x]}
+            return {"sender": GAME_ID, "header": GET_DATA, "agent_id" : self.agent_id, "x": self.agents[agent_id].x, "y": self.agents[agent_id].y, "w": self.map_w, "h": self.map_h, "cell_val": self.map_real[self.agents[agent_id].y, self.agents[agent_id].x], "all_agents_positions": [(a.x, a.y) for a in self.agents]}
         elif msg["header"] == GET_NB_CONNECTED_AGENTS:
             return {"sender": GAME_ID, "header": GET_NB_CONNECTED_AGENTS, "nb_connected_agents": self.nb_ready}
         elif msg["header"] == GET_NB_AGENTS:
