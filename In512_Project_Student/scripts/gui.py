@@ -45,6 +45,11 @@ class GUI:
         agent_img = pygame.image.load(img_folder + "/robot.png")
         agent_img = pygame.transform.scale(agent_img, (self.cell_size, self.cell_size))
         self.agents = [agent_img.copy() for _ in range(self.game.nb_agents)]
+        #walls
+        wall_img = pygame.image.load(img_folder + "/wall.png")
+        wall_img = pygame.transform.scale(wall_img, (self.cell_size, self.cell_size))
+        # self.walls = [wall_img.copy() for _ in range(self.game.nb_agents)]
+        self.walls = [wall_img.copy() for _ in range(self.game.nb_agents*NB_WALLS)]
 
     
     def on_event(self, event):
@@ -95,5 +100,13 @@ class GUI:
             #agents
             self.screen.blit(self.agents[i], self.agents[i].get_rect(center=(self.game.agents[i].x*self.cell_size + self.cell_size//2, self.game.agents[i].y*self.cell_size + self.cell_size//2)))
             self.screen.blit(self.text_agents[i], self.text_agents[i].get_rect(center=(self.game.agents[i].x*self.cell_size + self.cell_size-self.text_agents[i].get_width()//2, self.game.agents[i].y*self.cell_size + self.cell_size-self.text_agents[i].get_height()//2)))
+
+            #walls
+        #     pygame.draw.rect(self.screen, BLACK, (self.game.walls[i].x*self.cell_size, self.game.walls[i].y*self.cell_size, self.cell_size, self.cell_size), width=3)
+        #     self.screen.blit(self.walls[i], self.walls[i].get_rect(topleft=(self.game.walls[i].x*self.cell_size, self.game.walls[i].y*self.cell_size)))
+        for i in range(self.game.nb_agents * NB_WALLS):
+            pygame.draw.rect(self.screen, BLACK, (self.game.walls[i].x*self.cell_size, self.game.walls[i].y*self.cell_size, self.cell_size, self.cell_size), width=3)
+            self.screen.blit(self.walls[i], self.walls[i].get_rect(topleft=(self.game.walls[i].x*self.cell_size, self.game.walls[i].y*self.cell_size)))
+            
 
         pygame.display.update()
