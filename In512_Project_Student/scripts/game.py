@@ -24,8 +24,7 @@ class Game:
         self.load_map(map_id)
         self.gui = GUI(self)
         
-
-    
+  
     def load_map(self, map_id):
         """ Load a map """
         json_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "resources", "config.json") 
@@ -38,7 +37,7 @@ class Game:
             self.keys.append(Key(self.map_cfg[f"key_{i+1}"]["x"], self.map_cfg[f"key_{i+1}"]["y"]))
             self.boxes.append(Box(self.map_cfg[f"box_{i+1}"]["x"], self.map_cfg[f"box_{i+1}"]["y"]))
             self.agent_paths[i] = [(self.agents[i].x, self.agents[i].y)]
-            # self.walls.append(Wall(self.map_cfg[f"wall_{i+1}"]["x"], self.map_cfg[f"wall_{i+1}"]["y"]))
+            # adding walls following the config file, 5 block for 1 wall, 1 wall for each agent
             for j in range(NB_WALLS):
                 self.walls.append(Wall(self.map_cfg[f"wall_{i+1}_{j+1}"]["x"], self.map_cfg[f"wall_{i+1}_{j+1}"]["y"]))
         
@@ -51,20 +50,18 @@ class Game:
         offsets = [[(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)], 
                    [(-2, -2), (-1, -2), (0, -2), (1, -2), (2, -2), (-2, -1), (2, -1), (-2, 0), (2, 0), (-2, 1), ( 2, 1), (-2, 2), (-1, 2), (0, 2), (1, 2), (2, 2)]]
         for item in items:
-            if item.type == "wall":
+            if item.type == "wall":                                                         # we use a different offset
                 for dx, dy in offsets[0]:
                     if dx != 0 or dy != 0:
-                        if self.get_cell_val(item.x + dx, item.y + dy) == 0:
-                            self.add_val(item.x + dx, item.y + dy, item.neighbour_percent)
+                        self.add_val(item.x + dx, item.y + dy, item.neighbour_percent)
                     else:
                         self.add_val(item.x + dx, item.y + dy, 1)
-            else:
-                for i, sub_list in enumerate(offsets):
-                    for dx, dy in sub_list:
-                        if dx != 0 or dy != 0:
-                            self.add_val(item.x + dx, item.y + dy, item.neighbour_percent/(i+1))
-                        else:
-                            self.add_val(item.x, item.y, 1)
+            for i, sub_list in enumerate(offsets):
+                for dx, dy in sub_list:
+                    if dx != 0 or dy != 0:
+                        self.add_val(item.x + dx, item.y + dy, item.neighbour_percent/(i+1))
+                    else:
+                        self.add_val(item.x, item.y, 1)
 
     
     def add_val(self, x, y, val):
@@ -77,6 +74,13 @@ class Game:
         if 0 <= x < self.map_w and 0 <= y < self.map_h:
             return self.map_real[y, x]
         return 0
+
+
+    def get_cell_value(self, x, y):
+        """ Return the value of the cell located at (x, y) """
+        if 0 <= x < self.map_w and 0 <= y < self.map_h:
+            return self.map_real[y, x]
+        return None
 
 
     def process(self, msg, agent_id):
@@ -105,7 +109,6 @@ class Game:
                     self.agent_paths[agent_id].append((self.agents[agent_id].x, self.agents[agent_id].y))
                     #sleep(0.5)
         return {"sender": GAME_ID, "header": MOVE, "x": self.agents[agent_id].x, "y": self.agents[agent_id].y, "cell_val": self.map_real[self.agents[agent_id].y, self.agents[agent_id].x]}
-
 
 
     def handle_item_owner_request(self, agent_id):
@@ -148,7 +151,7 @@ class Box(Item):
     def __init__(self, x, y):
         Item.__init__(self, x, y, BOX_NEIGHBOUR_PERCENTAGE, "box")
 
-
+# creation of the Wall class
 class Wall(Item):
     def __init__(self, x, y):
         Item.__init__(self, x, y, WALL_NEIGHBOUR_PERCENTAGE, "wall")
