@@ -40,6 +40,7 @@ class Agent:
 
         # Scanning Strategy
         self.scan_waypoints = []
+        self.known_obstacles = set()
 
         # Server msg container
         self.item_data_received = None
@@ -55,6 +56,7 @@ class Agent:
         self.nb_agent_connected = 0
         self.x, self.y = env_conf["x"], env_conf["y"]
         self.w, self.h = env_conf["w"], env_conf["h"]
+        self.all_agents_positions = env_conf.get("all_agents_positions", [])
 
         Thread(target=self.msg_cb, daemon=True).start()
         self.wait_for_connected_agent()
@@ -64,6 +66,12 @@ class Agent:
         while self.running:
             msg = self.network.receive()
             self.msg = msg
+
+            if msg is None:
+                # Si le serveur renvoie None, c'est probablement une réponse à GET_ITEM_OWNER sur un mur
+                # On débloque check_item_owner immédiatement
+                self.item_data_received = {"owner": None, "type": "wall"}
+                continue
 
             if msg["header"] == MOVE:
                 self.x, self.y = msg["x"], msg["y"]
@@ -145,7 +153,7 @@ class Agent:
         self.network.send({"header": GET_ITEM_OWNER})
         # Petite sécurité anti-boucle infinie
         timeout = 0
-        while self.item_data_received is None and timeout < 100:
+        while self.item_data_received is None and timeout < 200:
             sleep(0.01)
             timeout += 1
         if self.item_data_received:
@@ -172,15 +180,40 @@ class Agent:
         # Generation Zones de Scan
         if self.nb_agent_expected > 0:
             zone_width = self.w // self.nb_agent_expected
-            min_x = self.agent_id * zone_width
-            max_x = min_x + zone_width if self.agent_id != self.nb_agent_expected - 1 else self.w
+            # Determine my zone index based on sorted X positions
+            my_zone_index = self.agent_id # Default fallback
+            if self.all_agents_positions and len(self.all_agents_positions) == self.nb_agent_expected:
+                # Create list of (index, x, y)
+                indexed_positions = []
+                for i, pos in enumerate(self.all_agents_positions):
+                    indexed_positions.append((i, pos[0], pos[1]))
+                
+                # Sort by X, then Y
+                indexed_positions.sort(key=lambda p: (p[1], p[2]))
+                
+                # Find my rank
+                for rank, (aid, ax, ay) in enumerate(indexed_positions):
+                    if aid == self.agent_id:
+                        my_zone_index = rank
+                        break
 
-            cx = min_x + 1
-            down = True
-            while cx < max_x:
+            min_x = my_zone_index * zone_width
+            max_x = min_x + zone_width if my_zone_index != self.nb_agent_expected - 1 else self.w
+
+            # Adaptive Scan Direction (Start from closest side)
+            start_right = abs(self.x - max_x) < abs(self.x - min_x)
+            start_bottom = self.y > self.h // 2
+            # Generate X range: Left->Right or Right->Left
+            if start_right:
+                x_range = range(max_x - 2, min_x - 1, -4)
+            else:
+                x_range = range(min_x + 1, max_x, 4)
+
+            down = not start_bottom # If starting bottom, we go Up (down=False)
+            for cx in x_range:
                 self.scan_waypoints.append((cx, 0) if down else (cx, self.h - 1))
                 self.scan_waypoints.append((cx, self.h - 1) if down else (cx, 0))
-                cx += 4
+
                 down = not down
 
         while self.running and not self.completed:
@@ -200,6 +233,16 @@ class Agent:
             # --- ETAPE 1 : SUR UN ITEM (PRIORITÉ ABSOLUE) ---
             if real_val == 1.0:
                 owner_id, item_type = self.check_item_owner()
+
+                if owner_id is None:
+                    if self.my_box_location and (self.x, self.y) == self.my_box_location:
+                        continue
+                    self.known_obstacles.add((self.x, self.y))
+                    if self.previous_move and self.previous_move in inverse_move:
+                        self.send_move(inverse_move[self.previous_move])
+                    else:
+                        self.move_randomly_away(moves_map)
+                    continue
 
                 if owner_id is not None:
                     # 1. Broadcast la découverte
@@ -251,6 +294,18 @@ class Agent:
                     self.move_randomly_away(moves_map)
                 continue
 
+            # --- ETAPE 1.5 : EVITEMENT OBSTACLES (AURA MUR) ---
+            # Si on est dans la zone d'influence d'un mur (0.35), c'est une zone morte.
+            # On la marque comme obstacle pour ne plus y revenir et on s'en va.
+            if 0.34 <= real_val <= 0.36:
+                self.known_obstacles.add((self.x, self.y))
+                # On essaie de faire demi-tour, sinon random
+                if self.previous_move and self.previous_move in inverse_move:
+                    self.send_move(inverse_move[self.previous_move])
+                else:
+                    self.move_randomly_away(moves_map)
+                continue
+
             # --- ETAPE 2 : CIBLE DÉFINIE ---
             if self.target_pos:
                 tx, ty = self.target_pos
@@ -271,12 +326,6 @@ class Agent:
 
             # --- ETAPE 3 : NAVIGATION ---
 
-            # Obstacles
-            if 0.34 <= real_val <= 0.36:
-                if self.previous_move and self.previous_move in inverse_move:
-                    self.send_move(inverse_move[self.previous_move])
-                continue
-
             # Gradient Strict (Chasse à l'odeur)
             # Si on sent quelque chose, on ignore le scan et on cherche activement
             if perceived_val > 0:
@@ -291,7 +340,6 @@ class Agent:
                 self.last_value = perceived_val
 
                 valid = self.get_valid_moves(moves_map)
-                # On essaie de privilégier les mouvements non visités
                 best = [m for m in valid if
                         (self.x + moves_map[m][0], self.y + moves_map[m][1]) not in self.visited_cells]
 
@@ -324,7 +372,7 @@ class Agent:
                 self.last_value = 0
                 self.move_randomly_away(moves_map)
 
-    def move_randomly_away(self, moves_map):
+    def move_randomly_away(self, moves_map): # MATCHED
         valid = self.get_valid_moves(moves_map)
         if valid:
             m = random.choice(valid)
@@ -335,7 +383,7 @@ class Agent:
         possible = []
         for m_id, (dx, dy) in moves_map.items():
             nx, ny = self.x + dx, self.y + dy
-            if 0 <= nx < self.w and 0 <= ny < self.h:
+            if 0 <= nx < self.w and 0 <= ny < self.h and (nx, ny) not in self.known_obstacles:
                 possible.append(m_id)
         return possible
 
