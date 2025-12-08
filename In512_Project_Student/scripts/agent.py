@@ -55,6 +55,7 @@ class Agent:
         self.nb_agent_expected = 0
         self.nb_agent_connected = 0
         self.x, self.y = env_conf["x"], env_conf["y"]
+        self.current_cell_value = env_conf.get("cell_val", 0.0)
         self.w, self.h = env_conf["w"], env_conf["h"]
         self.all_agents_positions = env_conf.get("all_agents_positions", [])
 
@@ -66,6 +67,9 @@ class Agent:
         while self.running:
             msg = self.network.receive()
             self.msg = msg
+            
+            if msg and "cell_val" in msg:
+                self.current_cell_value = msg["cell_val"]
 
             if msg is None:
                 # Si le serveur renvoie None, c'est probablement une réponse à GET_ITEM_OWNER sur un mur
@@ -119,7 +123,7 @@ class Agent:
             sleep(0.5)
 
     def get_real_val(self):
-        return self.msg.get("cell_val", 0.0)
+        return self.current_cell_value
 
     def get_perceived_value(self):
         """
