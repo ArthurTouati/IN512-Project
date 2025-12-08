@@ -68,7 +68,7 @@ class Game:
     def add_val(self, x, y, val):
         """ Add a value if x and y coordinates are in the range [map_w; map_h] """
         if 0 <= x < self.map_w and 0 <= y < self.map_h:
-            self.map_real[y, x] = val
+            self.map_real[y, x] = max(self.map_real[y, x], val)
     
     def get_cell_val(self, x, y):
         """ Get the value of a cell """
