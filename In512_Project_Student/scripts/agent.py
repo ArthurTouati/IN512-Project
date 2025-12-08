@@ -282,7 +282,7 @@ class Agent:
                                 "sender": self.agent_id
                             })
 
-                            # Dégager de la case pour continuer
+                            # Dégager de la case pour continuer l'exploration
                             self.move_randomly_away(moves_map)
                             continue
 
@@ -292,6 +292,18 @@ class Agent:
                         self.network.send({"header": BROADCAST_MSG, "Msg type": COMPLETED})
                         print("Mission Terminée !")
                         break
+
+                    # 4. CONTINUER EXPLORATION: Si c'est une boite (la mienne ou celle d'un autre)
+                    #    et ce n'est pas le moment d'y aller, on dégage et on continue le scan
+                    if item_type == BOX_TYPE:
+                        # Dégager de la case de la boite pour pouvoir continuer l'exploration
+                        self.move_randomly_away(moves_map)
+                        continue
+                    
+                    # 5. Si c'est la clé de quelqu'un d'autre, on dégage aussi
+                    if item_type == KEY_TYPE and owner_id != self.agent_id:
+                        self.move_randomly_away(moves_map)
+                        continue
 
                 # Si on est sur un item mais pas d'action spéciale, on s'éloigne
                 if not self.target_pos:
