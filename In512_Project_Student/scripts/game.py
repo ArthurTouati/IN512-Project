@@ -56,12 +56,13 @@ class Game:
                         self.add_val(item.x + dx, item.y + dy, item.neighbour_percent)
                     else:
                         self.add_val(item.x + dx, item.y + dy, 1)
-            for i, sub_list in enumerate(offsets):
-                for dx, dy in sub_list:
-                    if dx != 0 or dy != 0:
-                        self.add_val(item.x + dx, item.y + dy, item.neighbour_percent/(i+1))
-                    else:
-                        self.add_val(item.x, item.y, 1)
+            else:
+                for i, sub_list in enumerate(offsets):
+                    for dx, dy in sub_list:
+                        if dx != 0 or dy != 0:
+                            self.add_val(item.x + dx, item.y + dy, item.neighbour_percent/(i+1))
+                        else:
+                            self.add_val(item.x, item.y, 1)
 
     
     def add_val(self, x, y, val):
