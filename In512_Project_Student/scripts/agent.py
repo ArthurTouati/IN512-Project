@@ -55,6 +55,7 @@ class Agent:
         self.nb_agent_expected = 0
         self.nb_agent_connected = 0
         self.x, self.y = env_conf["x"], env_conf["y"]
+        self.current_cell_value = env_conf.get("cell_val", 0.0)
         self.w, self.h = env_conf["w"], env_conf["h"]
         self.all_agents_positions = env_conf.get("all_agents_positions", [])
 
@@ -66,6 +67,9 @@ class Agent:
         while self.running:
             msg = self.network.receive()
             self.msg = msg
+            
+            if msg and "cell_val" in msg:
+                self.current_cell_value = msg["cell_val"]
 
             if msg is None:
                 # Si le serveur renvoie None, c'est probablement une réponse à GET_ITEM_OWNER sur un mur
@@ -88,26 +92,47 @@ class Agent:
             elif msg["header"] == BROADCAST_MSG:
                 # Enregistrement global des items découverts
                 if "position" in msg and "owner" in msg:
-                    self.discovered_items[msg["position"]] = msg["owner"]
+                    # Convert position to tuple if it's a list (network serialization issue)
+                    pos = msg["position"]
+                    if isinstance(pos, list):
+                        pos = tuple(pos)
+                    self.discovered_items[pos] = msg["owner"]
 
                 # Si une BOITE est découverte
                 if msg.get("Msg type") == BOX_DISCOVERED:
                     owner = msg.get("owner")
+                    pos = msg.get("position")
+                    if isinstance(pos, list):
+                        pos = tuple(pos)
                     self.agents_boxes_found.add(owner)
+                    print(f"Agent {self.agent_id}: Box for agent {owner} discovered at {pos}")
                     if owner == self.agent_id:
-                        self.my_box_location = msg["position"]
+                        self.my_box_location = pos
+                        print(f"Agent {self.agent_id}: MY BOX is at {pos}!")
 
                 # Si une CLÉ est DÉCOUVERTE (vue mais pas forcement prise)
                 elif msg.get("Msg type") == KEY_DISCOVERED:
                     owner = msg.get("owner")
+                    pos = msg.get("position")
+                    if isinstance(pos, list):
+                        pos = tuple(pos)
                     # Si c'est ma clé, je la cible IMMEDIATEMENT
                     if owner == self.agent_id and not self.my_key_found:
-                        self.target_pos = msg["position"]
+                        self.target_pos = pos
 
                 # Si une CLÉ est RAMASSÉE (Confirmation officielle)
                 if msg.get("sub_type") == "KEY_COLLECTED":
                     sender = msg.get("sender")
                     self.agents_with_keys.add(sender)
+                
+                # GO SIGNAL reçu d'un autre agent
+                if msg.get("sub_type") == "GO_TO_BOX":
+                    if not self.go_signal:
+                        print(f"Agent {self.agent_id}: Received GO_TO_BOX signal!")
+                        self.go_signal = True
+                        self.target_pos = self.my_box_location
+                        if self.my_box_location is None:
+                            print(f"Agent {self.agent_id}: WARNING - Received GO signal but don't know my box location!")
 
     def wait_for_connected_agent(self):
         self.network.send({"header": GET_NB_AGENTS})
@@ -119,7 +144,7 @@ class Agent:
             sleep(0.5)
 
     def get_real_val(self):
-        return self.msg.get("cell_val", 0.0)
+        return self.current_cell_value
 
     def get_perceived_value(self):
         """
@@ -168,8 +193,166 @@ class Agent:
         if all_keys and all_boxes:
             if not self.go_signal:
                 print(f"Agent {self.agent_id}: TOUT EST TROUVÉ ! GO AUX BOITES !")
+                print(f"Agent {self.agent_id}: My box location = {self.my_box_location}")
+                print(f"Agent {self.agent_id}: Keys found: {self.agents_with_keys}, Boxes found: {self.agents_boxes_found}")
+                if self.my_box_location is None:
+                    print(f"Agent {self.agent_id}: WARNING - Box location unknown!")
+                
+                # BROADCAST GO SIGNAL to all agents
+                self.network.send({
+                    "header": BROADCAST_MSG,
+                    "sub_type": "GO_TO_BOX"
+                })
             self.go_signal = True
             self.target_pos = self.my_box_location
+
+    def _generate_grid_zones(self):
+        """
+        Generate grid-based zones based on number of agents.
+        Returns list of zones as (min_x, max_x, min_y, max_y) tuples.
+        
+        For 3 agents (assuming 35x30 grid):
+        - Zone 0: Top-left (0-17, 0-19) = 18x20
+        - Zone 1: Top-right (18-34, 0-19) = 17x20  
+        - Zone 2: Bottom (0-34, 20-29) = 35x10
+        """
+        zones = []
+        n = self.nb_agent_expected
+        
+        if n == 1:
+            # Single agent covers everything
+            zones.append((0, self.w, 0, self.h))
+            
+        elif n == 2:
+            # Split vertically (left/right)
+            mid_x = self.w // 2
+            zones.append((0, mid_x, 0, self.h))       # Left
+            zones.append((mid_x, self.w, 0, self.h))  # Right
+            
+        elif n == 3:
+            # Grid layout: 2 zones on top, 1 zone at bottom
+            # Top row: 2/3 of height, Bottom row: 1/3 of height
+            top_height = (self.h * 2) // 3  # ~20 if h=30
+            mid_x = self.w // 2
+            
+            zones.append((0, mid_x, 0, top_height))           # Top-left (18x20)
+            zones.append((mid_x, self.w, 0, top_height))      # Top-right (17x20)
+            zones.append((0, self.w, top_height, self.h))     # Bottom (35x10)
+            
+        elif n == 4:
+            # 2x2 grid
+            mid_x = self.w // 2
+            mid_y = self.h // 2
+            zones.append((0, mid_x, 0, mid_y))           # Top-left
+            zones.append((mid_x, self.w, 0, mid_y))      # Top-right
+            zones.append((0, mid_x, mid_y, self.h))      # Bottom-left
+            zones.append((mid_x, self.w, mid_y, self.h)) # Bottom-right
+            
+        else:
+            # For 5+ agents: Create a grid with roughly equal zones
+            # Calculate grid dimensions
+            cols = int(np.ceil(np.sqrt(n)))
+            rows = int(np.ceil(n / cols))
+            
+            zone_w = self.w // cols
+            zone_h = self.h // rows
+            
+            for i in range(n):
+                col = i % cols
+                row = i // cols
+                min_x = col * zone_w
+                max_x = (col + 1) * zone_w if col < cols - 1 else self.w
+                min_y = row * zone_h
+                max_y = (row + 1) * zone_h if row < rows - 1 else self.h
+                zones.append((min_x, max_x, min_y, max_y))
+        
+        return zones
+
+    def _assign_zone_to_agent(self, zones):
+        """
+        Assign each agent to their closest zone based on spawn position.
+        Uses agent positions to avoid conflicts - each agent gets unique zone.
+        """
+        if not zones:
+            return None
+            
+        # Calculate center of each zone
+        zone_centers = []
+        for (min_x, max_x, min_y, max_y) in zones:
+            cx = (min_x + max_x) / 2
+            cy = (min_y + max_y) / 2
+            zone_centers.append((cx, cy))
+        
+        # If we have all agent positions, do smart assignment
+        if self.all_agents_positions and len(self.all_agents_positions) == self.nb_agent_expected:
+            # Calculate distance from each agent to each zone center
+            # Then assign zones to minimize total distance (greedy approach)
+            
+            assigned_zones = {}  # agent_id -> zone_index
+            available_zones = set(range(len(zones)))
+            
+            # Sort agents by their minimum distance to any zone (greedy)
+            agent_zone_distances = []
+            for aid, (ax, ay) in enumerate(self.all_agents_positions):
+                for zid, (cx, cy) in enumerate(zone_centers):
+                    dist = np.sqrt((ax - cx)**2 + (ay - cy)**2)
+                    agent_zone_distances.append((dist, aid, zid))
+            
+            # Sort by distance (shortest first)
+            agent_zone_distances.sort(key=lambda x: x[0])
+            
+            # Greedy assignment
+            assigned_agents = set()
+            for dist, aid, zid in agent_zone_distances:
+                if aid not in assigned_agents and zid in available_zones:
+                    assigned_zones[aid] = zid
+                    assigned_agents.add(aid)
+                    available_zones.remove(zid)
+                    
+                    if len(assigned_agents) == len(zones):
+                        break
+            
+            # Return my assigned zone
+            if self.agent_id in assigned_zones:
+                return zones[assigned_zones[self.agent_id]]
+        
+        # Fallback: assign zone by agent_id
+        zone_idx = self.agent_id % len(zones)
+        return zones[zone_idx]
+
+    def _generate_zone_waypoints(self, min_x, max_x, min_y, max_y):
+        """
+        Generate snake-pattern scan waypoints within a zone.
+        Adds margins to avoid walls at boundaries.
+        """
+        # Add margins to avoid walls at boundaries
+        margin = 2
+        safe_min_x = min_x + margin
+        safe_max_x = max(safe_min_x + 1, max_x - margin)
+        safe_min_y = min_y + margin
+        safe_max_y = max(safe_min_y + 1, max_y - margin)
+        
+        # Adaptive Scan Direction (Start from closest corner)
+        start_right = abs(self.x - safe_max_x) < abs(self.x - safe_min_x)
+        start_bottom = self.y > (safe_min_y + safe_max_y) // 2
+        
+        # Generate X range: Left->Right or Right->Left
+        step = 4  # How far apart scan lines are
+        if start_right:
+            x_range = range(safe_max_x - 1, safe_min_x - 1, -step)
+        else:
+            x_range = range(safe_min_x + 1, safe_max_x, step)
+        
+        down = not start_bottom  # If starting bottom, we go Up (down=False)
+        for cx in x_range:
+            # Clamp to safe zone boundaries (with margin)
+            if down:
+                self.scan_waypoints.append((cx, safe_min_y))
+                self.scan_waypoints.append((cx, safe_max_y - 1))
+            else:
+                self.scan_waypoints.append((cx, safe_max_y - 1))
+                self.scan_waypoints.append((cx, safe_min_y))
+            down = not down
 
     def run_exploration(self):
         print(f"Agent {self.agent_id} démarre l'exploration...")
@@ -177,44 +360,20 @@ class Agent:
         moves_map = {1: (-1, 0), 2: (1, 0), 3: (0, -1), 4: (0, 1), 5: (-1, -1), 6: (1, -1), 7: (-1, 1), 8: (1, 1)}
         inverse_move = {1: 2, 2: 1, 3: 4, 4: 3, 5: 8, 6: 7, 7: 6, 8: 5}
 
-        # Generation Zones de Scan
+        # Generation Zones de Scan - Grid-based division
         if self.nb_agent_expected > 0:
-            zone_width = self.w // self.nb_agent_expected
-            # Determine my zone index based on sorted X positions
-            my_zone_index = self.agent_id # Default fallback
-            if self.all_agents_positions and len(self.all_agents_positions) == self.nb_agent_expected:
-                # Create list of (index, x, y)
-                indexed_positions = []
-                for i, pos in enumerate(self.all_agents_positions):
-                    indexed_positions.append((i, pos[0], pos[1]))
+            # Define zones as rectangles: (min_x, max_x, min_y, max_y)
+            zones = self._generate_grid_zones()
+            
+            # Assign agent to closest zone based on spawn position
+            my_zone = self._assign_zone_to_agent(zones)
+            
+            if my_zone:
+                min_x, max_x, min_y, max_y = my_zone
+                print(f"Agent {self.agent_id} assigned zone: x=[{min_x},{max_x}], y=[{min_y},{max_y}]")
                 
-                # Sort by X, then Y
-                indexed_positions.sort(key=lambda p: (p[1], p[2]))
-                
-                # Find my rank
-                for rank, (aid, ax, ay) in enumerate(indexed_positions):
-                    if aid == self.agent_id:
-                        my_zone_index = rank
-                        break
-
-            min_x = my_zone_index * zone_width
-            max_x = min_x + zone_width if my_zone_index != self.nb_agent_expected - 1 else self.w
-
-            # Adaptive Scan Direction (Start from closest side)
-            start_right = abs(self.x - max_x) < abs(self.x - min_x)
-            start_bottom = self.y > self.h // 2
-            # Generate X range: Left->Right or Right->Left
-            if start_right:
-                x_range = range(max_x - 2, min_x - 1, -4)
-            else:
-                x_range = range(min_x + 1, max_x, 4)
-
-            down = not start_bottom # If starting bottom, we go Up (down=False)
-            for cx in x_range:
-                self.scan_waypoints.append((cx, 0) if down else (cx, self.h - 1))
-                self.scan_waypoints.append((cx, self.h - 1) if down else (cx, 0))
-
-                down = not down
+                # Generate scan waypoints for this zone
+                self._generate_zone_waypoints(min_x, max_x, min_y, max_y)
 
         while self.running and not self.completed:
             real_val = self.get_real_val()
@@ -237,11 +396,67 @@ class Agent:
                 if owner_id is None:
                     if self.my_box_location and (self.x, self.y) == self.my_box_location:
                         continue
+                    
+                    # Mark current position and nearby cells as obstacles
                     self.known_obstacles.add((self.x, self.y))
+                    
+                    # Skip current waypoint if it's blocked by a wall or near a wall
+                    while self.scan_waypoints:
+                        wp = self.scan_waypoints[0]
+                        # Skip if waypoint is on or adjacent to a known obstacle
+                        is_near_obstacle = False
+                        for dx in range(-1, 2):
+                            for dy in range(-1, 2):
+                                if (wp[0] + dx, wp[1] + dy) in self.known_obstacles:
+                                    is_near_obstacle = True
+                                    break
+                            if is_near_obstacle:
+                                break
+                        if is_near_obstacle or wp == (self.x, self.y):
+                            self.scan_waypoints.pop(0)
+                        else:
+                            break
+                    
+                    # EMERGENCY ESCAPE: Try all directions to get away from wall
+                    escaped = False
+                    # First try: inverse of previous move
                     if self.previous_move and self.previous_move in inverse_move:
-                        self.send_move(inverse_move[self.previous_move])
-                    else:
-                        self.move_randomly_away(moves_map)
+                        escape_move = inverse_move[self.previous_move]
+                        nx, ny = self.x + moves_map[escape_move][0], self.y + moves_map[escape_move][1]
+                        if 0 <= nx < self.w and 0 <= ny < self.h and (nx, ny) not in self.known_obstacles:
+                            self.send_move(escape_move)
+                            escaped = True
+                    
+                    # Second try: any valid move away from obstacles
+                    if not escaped:
+                        valid = self.get_valid_moves(moves_map)
+                        if valid:
+                            # Prefer moves that go away from obstacles
+                            best_move = None
+                            max_dist_from_obstacles = -1
+                            for m in valid:
+                                nx, ny = self.x + moves_map[m][0], self.y + moves_map[m][1]
+                                min_dist = float('inf')
+                                for obs in self.known_obstacles:
+                                    d = abs(nx - obs[0]) + abs(ny - obs[1])
+                                    min_dist = min(min_dist, d)
+                                if min_dist > max_dist_from_obstacles:
+                                    max_dist_from_obstacles = min_dist
+                                    best_move = m
+                            if best_move:
+                                self.previous_move = best_move
+                                self.send_move(best_move)
+                                escaped = True
+                    
+                    # Last resort: try any move including diagonal
+                    if not escaped:
+                        for m in [1, 2, 3, 4, 5, 6, 7, 8]:
+                            nx, ny = self.x + moves_map[m][0], self.y + moves_map[m][1]
+                            if 0 <= nx < self.w and 0 <= ny < self.h:
+                                self.send_move(m)
+                                break
+                    
+                    self.stuck_counter = 0  # Reset stuck counter after escape attempt
                     continue
 
                 if owner_id is not None:
@@ -278,7 +493,7 @@ class Agent:
                                 "sender": self.agent_id
                             })
 
-                            # Dégager de la case pour continuer
+                            # Dégager de la case pour continuer l'exploration
                             self.move_randomly_away(moves_map)
                             continue
 
@@ -289,19 +504,51 @@ class Agent:
                         print("Mission Terminée !")
                         break
 
+                    # 4. CONTINUER EXPLORATION: Si c'est une boite (la mienne ou celle d'un autre)
+                    #    et ce n'est pas le moment d'y aller, on dégage et on continue le scan
+                    if item_type == BOX_TYPE:
+                        # Dégager de la case de la boite pour pouvoir continuer l'exploration
+                        self.move_randomly_away(moves_map)
+                        continue
+                    
+                    # 5. Si c'est la clé de quelqu'un d'autre, on dégage aussi
+                    if item_type == KEY_TYPE and owner_id != self.agent_id:
+                        self.move_randomly_away(moves_map)
+                        continue
+
                 # Si on est sur un item mais pas d'action spéciale, on s'éloigne
                 if not self.target_pos:
                     self.move_randomly_away(moves_map)
                 continue
 
             # --- ETAPE 1.5 : EVITEMENT OBSTACLES (AURA MUR) ---
-            # Si on est dans la zone d'influence d'un mur (0.35), c'est une zone morte.
-            # On la marque comme obstacle pour ne plus y revenir et on s'en va.
+            # Si on est dans la zone d'influence d'un mur (0.35), on detecte la direction du mur
             if 0.34 <= real_val <= 0.36:
                 self.known_obstacles.add((self.x, self.y))
-                # On essaie de faire demi-tour, sinon random
+                
+                # Try to predict where the actual wall is and mark it
+                # The wall is likely in the direction we were moving
+                if self.previous_move and self.previous_move in moves_map:
+                    dx, dy = moves_map[self.previous_move]
+                    wall_x, wall_y = self.x + dx, self.y + dy
+                    if 0 <= wall_x < self.w and 0 <= wall_y < self.h:
+                        self.known_obstacles.add((wall_x, wall_y))
+                        # Also mark adjacent cells to the predicted wall
+                        for ddx, ddy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                            adj_x, adj_y = wall_x + ddx, wall_y + ddy
+                            if 0 <= adj_x < self.w and 0 <= adj_y < self.h:
+                                # Don't mark if it's where we came from
+                                if (adj_x, adj_y) != (self.x - dx, self.y - dy):
+                                    self.known_obstacles.add((adj_x, adj_y))
+                
+                # Back off in the opposite direction
                 if self.previous_move and self.previous_move in inverse_move:
-                    self.send_move(inverse_move[self.previous_move])
+                    escape_move = inverse_move[self.previous_move]
+                    nx, ny = self.x + moves_map[escape_move][0], self.y + moves_map[escape_move][1]
+                    if 0 <= nx < self.w and 0 <= ny < self.h and (nx, ny) not in self.known_obstacles:
+                        self.send_move(escape_move)
+                    else:
+                        self.move_randomly_away(moves_map)
                 else:
                     self.move_randomly_away(moves_map)
                 continue
@@ -310,9 +557,42 @@ class Agent:
             if self.target_pos:
                 tx, ty = self.target_pos
 
-                # Anti-blocage
+                # Make sure target is not in obstacles (important for box location)
+                if (tx, ty) in self.known_obstacles:
+                    self.known_obstacles.discard((tx, ty))
+
+                # Anti-blocage: If stuck for too long, try smarter escape
                 if self.stuck_counter > 3 and (self.x, self.y) != (tx, ty):
-                    self.move_randomly_away(moves_map)
+                    if self.stuck_counter > 10:
+                        # Very stuck - clear some nearby obstacles to allow new paths
+                        cells_to_clear = []
+                        for obs in self.known_obstacles:
+                            if abs(obs[0] - self.x) <= 3 and abs(obs[1] - self.y) <= 3:
+                                cells_to_clear.append(obs)
+                        for cell in cells_to_clear[:5]:  # Clear up to 5 nearby obstacles
+                            self.known_obstacles.discard(cell)
+                        self.stuck_counter = 0
+                    
+                    # Try to find an alternative route around obstacles
+                    valid = self.get_valid_moves(moves_map)
+                    if valid:
+                        # Pick a move that isn't directly blocked and makes some progress
+                        best_move = None
+                        best_score = float('inf')
+                        for m in valid:
+                            nx, ny = self.x + moves_map[m][0], self.y + moves_map[m][1]
+                            # Score: distance to target + penalty for visited cells
+                            dist = np.sqrt((nx - tx)**2 + (ny - ty)**2)
+                            visited_penalty = 5.0 if (nx, ny) in self.visited_cells else 0
+                            score = dist + visited_penalty
+                            if score < best_score:
+                                best_score = score
+                                best_move = m
+                        if best_move:
+                            self.previous_move = best_move
+                            self.send_move(best_move)
+                    else:
+                        self.move_randomly_away(moves_map)
                     continue
 
                 if self.x == tx and self.y == ty:
@@ -321,7 +601,12 @@ class Agent:
                     self.target_pos = None
                 else:
                     move = self.get_move_towards(tx, ty, moves_map)
-                    if move: self.send_move(move)
+                    if move:
+                        self.previous_move = move
+                        self.send_move(move)
+                    else:
+                        # No valid move found - try random to escape
+                        self.move_randomly_away(moves_map)
                     continue
 
             # --- ETAPE 3 : NAVIGATION ---
@@ -380,23 +665,80 @@ class Agent:
             self.send_move(m)
 
     def get_valid_moves(self, moves_map):
+        """Get valid moves that don't lead to walls or out of bounds"""
         possible = []
+        # Diagonal moves and their component directions
+        # Move 5 (-1,-1) requires both move 1 (-1,0) and move 3 (0,-1) to be clear
+        # Move 6 (1,-1) requires both move 2 (1,0) and move 3 (0,-1) to be clear
+        # Move 7 (-1,1) requires both move 1 (-1,0) and move 4 (0,1) to be clear
+        # Move 8 (1,1) requires both move 2 (1,0) and move 4 (0,1) to be clear
+        diagonal_components = {
+            5: [(-1, 0), (0, -1)],  # up-left requires up and left clear
+            6: [(1, 0), (0, -1)],   # up-right requires up and right clear
+            7: [(-1, 0), (0, 1)],   # down-left requires down and left clear
+            8: [(1, 0), (0, 1)]     # down-right requires down and right clear
+        }
+        
         for m_id, (dx, dy) in moves_map.items():
             nx, ny = self.x + dx, self.y + dy
             if 0 <= nx < self.w and 0 <= ny < self.h and (nx, ny) not in self.known_obstacles:
-                possible.append(m_id)
+                # For diagonal moves, check that component directions are also clear
+                if m_id in diagonal_components:
+                    components_clear = True
+                    for cdx, cdy in diagonal_components[m_id]:
+                        cx, cy = self.x + cdx, self.y + cdy
+                        if (cx, cy) in self.known_obstacles:
+                            components_clear = False
+                            break
+                    if not components_clear:
+                        continue  # Skip this diagonal move - would clip through wall
+                
+                # Also check if we'd be moving into a corner surrounded by obstacles
+                obstacle_neighbors = 0
+                for ddx, ddy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    if (nx + ddx, ny + ddy) in self.known_obstacles:
+                        obstacle_neighbors += 1
+                # Only add if not too many obstacle neighbors (avoid getting trapped)
+                if obstacle_neighbors < 3:
+                    possible.append(m_id)
+        
+        # Fallback: if no safe moves, allow any move that's not an obstacle
+        if not possible:
+            for m_id, (dx, dy) in moves_map.items():
+                nx, ny = self.x + dx, self.y + dy
+                if 0 <= nx < self.w and 0 <= ny < self.h and (nx, ny) not in self.known_obstacles:
+                    possible.append(m_id)
+        
         return possible
 
     def get_move_towards(self, tx, ty, moves_map):
-        best_dist = float('inf')
-        best_move = None
-        for m in self.get_valid_moves(moves_map):
+        """Move towards target, preferring unvisited cells and avoiding obstacles"""
+        valid_moves = self.get_valid_moves(moves_map)
+        if not valid_moves:
+            return None
+            
+        # Score each move: lower is better
+        move_scores = []
+        for m in valid_moves:
             nx, ny = self.x + moves_map[m][0], self.y + moves_map[m][1]
             dist = np.sqrt((nx - tx) ** 2 + (ny - ty) ** 2)
-            if dist < best_dist:
-                best_dist = dist
-                best_move = m
-        return best_move
+            
+            # Penalize visited cells slightly to encourage exploration
+            visited_penalty = 2.0 if (nx, ny) in self.visited_cells else 0.0
+            
+            # Heavily penalize cells adjacent to known obstacles (walls)
+            obstacle_penalty = 0.0
+            for (dx, dy) in moves_map.values():
+                adj_x, adj_y = nx + dx, ny + dy
+                if (adj_x, adj_y) in self.known_obstacles:
+                    obstacle_penalty += 0.5
+            
+            total_score = dist + visited_penalty + obstacle_penalty
+            move_scores.append((total_score, m))
+        
+        # Sort by score (lowest first) and return best move
+        move_scores.sort(key=lambda x: x[0])
+        return move_scores[0][1] if move_scores else None
 
 
 if __name__ == "__main__":
