@@ -15,7 +15,7 @@ import sys
 
 
 class Agent:
-    """ Multi-agent exploration with aggressive wall avoidance """
+    """ Multi-agent exploration with improved coordination for 3+ agents """
     def __init__(self, server_ip):
         # Exploration state
         self.visited = set()
@@ -24,10 +24,13 @@ class Agent:
         self.blocked_cells = set()
         self.item_cells = set()
         
+        # Track other agents' positions
+        self.other_agents_positions = set()
+        
         # Previous position for backtracking
         self.prev_x, self.prev_y = 0, 0
         self.previous_move = None
-        self.last_value = 0.0  # For gradient tracking
+        self.last_value = 0.0
         
         # Item discovery
         self.my_key_collected = False
@@ -39,10 +42,10 @@ class Agent:
         # Coordination
         self.completed = False
         
-        # Lane exploration
+        # Lane exploration - FIXED for 3+ agents
         self.my_zone_start = 0
         self.my_zone_end = 0
-        self.lane_spacing = 4
+        self.lane_spacing = 3  # Reduced from 4 for better coverage
         self.current_lane = 0
         self.lane_direction = 1
         
@@ -87,6 +90,12 @@ class Agent:
         self.w, self.h = env_conf["w"], env_conf["h"]
         cell_val = env_conf["cell_val"]
         
+        # Update other agents positions from initial data
+        if "all_agents_positions" in env_conf:
+            for i, (ax, ay) in enumerate(env_conf["all_agents_positions"]):
+                if i != self.agent_id:
+                    self.other_agents_positions.add((ax, ay))
+        
         self.prev_x, self.prev_y = self.x, self.y
         self.visited.add((self.x, self.y))
         self.exploration_map[(self.x, self.y)] = cell_val
@@ -100,30 +109,20 @@ class Agent:
 
 
     def block_wall_zone(self, x, y):
-        """
-        When we detect a wall cell (0.35 or confirmed wall),
-        block just that cell to prevent entering it.
-        """
+        """Block a wall cell to prevent entering it"""
         pos = (x, y)
         if pos not in self.item_cells:
             self.blocked_cells.add(pos)
 
 
     def on_wall_aura(self, x, y, cell_val):
-        """
-        Called when we step on a 0.35 cell (wall aura).
-        Block just this cell and predict where the wall is ahead.
-        """
-        # Block just this cell (the aura)
+        """Called when we step on a 0.35 cell (wall aura)"""
         if (x, y) not in self.item_cells:
             self.blocked_cells.add((x, y))
         
-        # Predict where the wall is based on previous move direction
-        # Only block cells AHEAD (where the wall likely is)
         if self.previous_move and self.previous_move in self.directions:
             dx, dy = self.directions[self.previous_move]
-            if dx != 0 or dy != 0:  # Not STAND
-                # The wall is likely 1 cell ahead in the direction we were moving
+            if dx != 0 or dy != 0:
                 wall_x, wall_y = x + dx, y + dy
                 if 0 <= wall_x < self.w and 0 <= wall_y < self.h:
                     if (wall_x, wall_y) not in self.item_cells:
@@ -142,7 +141,6 @@ class Agent:
                     header = msg.get("header")
                     
                     if header == MOVE:
-                        # Save previous position
                         self.prev_x, self.prev_y = self.x, self.y
                         
                         self.x, self.y = msg["x"], msg["y"]
@@ -151,9 +149,16 @@ class Agent:
                         self.visited.add(pos)
                         self.exploration_map[pos] = self.current_cell_val
                         
-                        # Check for wall aura
                         if abs(self.current_cell_val - 0.35) < 0.02:
                             self.on_wall_aura(self.x, self.y, self.current_cell_val)
+                        
+                    elif header == GET_DATA:
+                        # Update other agents positions
+                        if "all_agents_positions" in msg:
+                            self.other_agents_positions.clear()
+                            for i, (ax, ay) in enumerate(msg["all_agents_positions"]):
+                                if i != self.agent_id:
+                                    self.other_agents_positions.add((ax, ay))
                         
                     elif header == GET_NB_AGENTS:
                         self.nb_agent_expected = msg["nb_agents"]
@@ -184,23 +189,40 @@ class Agent:
     
     
     def setup_zones(self):
+        """FIXED: Better zone division for 3+ agents"""
+        # Each agent gets an equal vertical slice
         zone_height = self.h // self.nb_agent_expected
+        
+        # Calculate zone boundaries
         self.my_zone_start = self.agent_id * zone_height
-        self.my_zone_end = (self.agent_id + 1) * zone_height - 1
+        
+        # Last agent takes the remainder
         if self.agent_id == self.nb_agent_expected - 1:
             self.my_zone_end = self.h - 1
-        self.current_lane = self.my_zone_start
-        self.lane_direction = 1 if self.x < self.w // 2 else -1
-        print(f"Agent {self.agent_id}: Zone {self.my_zone_start}-{self.my_zone_end}")
+        else:
+            self.my_zone_end = (self.agent_id + 1) * zone_height - 1
+        
+        # Start in the middle of our zone for better initial spread
+        self.current_lane = self.my_zone_start + zone_height // 2
+        
+        # Alternate starting direction based on agent ID
+        self.lane_direction = 1 if self.agent_id % 2 == 0 else -1
+        
+        print(f"Agent {self.agent_id}: Zone Y=[{self.my_zone_start}, {self.my_zone_end}], Start lane={self.current_lane}, Dir={self.lane_direction}")
     
     
     def is_blocked(self, pos):
+        """Check if position is blocked (walls, obstacles, or other agents)"""
         x, y = pos
         if x < 0 or x >= self.w or y < 0 or y >= self.h:
             return True
         
         if pos in self.item_cells:
             return False
+        
+        # FIXED: Consider other agents as temporary obstacles
+        if pos in self.other_agents_positions:
+            return True
         
         if pos in self.blocked_cells:
             return True
@@ -214,36 +236,20 @@ class Agent:
     
     
     def is_on_item_aura(self):
-        """
-        Check if we're on an item aura (not wall aura).
-        Key aura: 0.25 -> 0.5 -> 1.0
-        Box aura: 0.3 -> 0.6 -> 1.0
-        Wall aura: 0.35
-        Returns True if on key or box aura (but not on the item itself at 1.0)
-        Only returns True if the item hasn't been discovered yet.
-        """
+        """Check if we're on an undiscovered item aura"""
         val = self.current_cell_val
         
-        # Exclude wall aura (0.35) and empty cells (0)
         if val < 0.2 or abs(val - 0.35) < 0.03:
             return False
         
-        # Exclude the item itself (1.0)
         if abs(val - 1.0) < 0.01:
             return False
         
-        # Key aura range: 0.25 to 0.5
-        # Box aura range: 0.3 to 0.6
-        # Combined: anything from 0.2 to 0.7 (excluding wall at 0.35)
         if 0.2 <= val <= 0.7:
-            # Check if we're near an already-discovered item
-            # If so, don't follow this gradient anymore
             current_pos = (self.x, self.y)
             
-            # Check all known item positions
             all_known_items = list(self.all_keys.values()) + list(self.all_boxes.values())
             for item_pos in all_known_items:
-                # If within 3 cells of a known item, this is its aura - skip it
                 dist = abs(current_pos[0] - item_pos[0]) + abs(current_pos[1] - item_pos[1])
                 if dist <= 3:
                     return False
@@ -251,57 +257,6 @@ class Agent:
             return True
         
         return False
-    
-    
-    def follow_item_gradient(self):
-        """
-        When on an item aura, move toward adjacent cell with highest value
-        to find the item (which has value 1.0).
-        Prioritizes: 1) Known higher values, 2) Unvisited adjacent cells
-        """
-        best_pos = None
-        best_val = self.current_cell_val
-        unvisited_candidates = []
-        
-        # Check all 8 adjacent cells
-        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,-1), (-1,1), (1,1)]:
-            nx, ny = self.x + dx, self.y + dy
-            
-            # Skip out of bounds
-            if nx < 0 or nx >= self.w or ny < 0 or ny >= self.h:
-                continue
-            
-            # Skip blocked cells (but not item cells)
-            pos = (nx, ny)
-            if pos in self.blocked_cells and pos not in self.item_cells:
-                continue
-            
-            # Get cell value
-            cell_val = self.exploration_map.get(pos, None)
-            
-            if cell_val is not None:
-                # Skip wall aura cells
-                if abs(cell_val - 0.35) < 0.03:
-                    continue
-                # Found a higher value - potential path to item
-                if cell_val > best_val:
-                    best_val = cell_val
-                    best_pos = pos
-            else:
-                # Unvisited cell - we should explore it to find the item
-                unvisited_candidates.append(pos)
-        
-        # Priority 1: Move to known higher value (closer to item)
-        if best_pos:
-            return self.direction_to(best_pos)
-        
-        # Priority 2: Explore unvisited adjacent cells
-        if unvisited_candidates:
-            # Pick the first unvisited cell to explore
-            return self.direction_to(unvisited_candidates[0])
-        
-        # No better adjacent cell found, continue normal exploration
-        return None
     
     
     def direction_to(self, target):
@@ -314,15 +269,12 @@ class Agent:
                 return d
         return STAND
     
+    
     def get_perceived_value(self):
-        """
-        Returns the cell value but masks already-discovered items.
-        Exception: Shows own key if not yet collected, and own box if go signal is active.
-        """
+        """Returns cell value but masks already-discovered items"""
         val = self.current_cell_val
         current_pos = (self.x, self.y)
         
-        # Check all known item positions
         all_known_items = {}
         for owner, pos in self.all_keys.items():
             all_known_items[pos] = ('key', owner)
@@ -330,22 +282,18 @@ class Agent:
             all_known_items[pos] = ('box', owner)
         
         for item_pos, (item_type, owner) in all_known_items.items():
-            # Check if we're in range of this item's aura (within 2 cells)
             if abs(self.x - item_pos[0]) <= 2 and abs(self.y - item_pos[1]) <= 2:
-                # Don't mask my own key that I haven't collected yet
                 if item_type == 'key' and owner == self.agent_id and not self.my_key_collected:
                     return val
-                # Don't mask my own box if ready to go
                 if item_type == 'box' and owner == self.agent_id and self.ready_for_box():
                     return val
-                # Mask other items to avoid distraction
                 return 0.0
         
         return val
     
     
     def get_valid_exploration_moves(self):
-        """Get valid moves that don't lead to walls, blocked cells, or out of bounds"""
+        """Get valid moves avoiding walls, obstacles, and other agents"""
         valid_moves = []
         for d, (dx, dy) in self.directions.items():
             if d == STAND:
@@ -353,16 +301,13 @@ class Agent:
             nx, ny = self.x + dx, self.y + dy
             if 0 <= nx < self.w and 0 <= ny < self.h:
                 if not self.is_blocked((nx, ny)):
-                    # Also check if this cell has wall aura value in exploration_map
                     cell_val = self.exploration_map.get((nx, ny), None)
                     if cell_val is not None and abs(cell_val - 0.35) < 0.03:
-                        # This is a wall aura cell - block it
                         self.block_wall_zone(nx, ny)
                         continue
                     
-                    # For diagonal moves, check that we won't clip through walls
+                    # Check diagonal clipping
                     if abs(dx) == 1 and abs(dy) == 1:
-                        # Check both cardinal components
                         side1 = (self.x + dx, self.y)
                         side2 = (self.x, self.y + dy)
                         if self.is_blocked(side1) or self.is_blocked(side2):
@@ -373,68 +318,108 @@ class Agent:
     
     
     def explore_lane(self):
+        """IMPROVED: Lane exploration with better gradient following and agent avoidance"""
         import random
         
-        # Check if currently on wall aura or in blocked cell - escape!
+        # Update other agents positions MORE FREQUENTLY during navigation
+        self.network.send({"header": GET_DATA})
+        sleep(0.03)  # Reduced from 0.05 for faster updates
+        
         current_pos = (self.x, self.y)
+        
+        # CRITICAL: If stuck on a wall or in blocked cell, escape immediately!
         if abs(self.current_cell_val - 0.35) < 0.02 or current_pos in self.blocked_cells:
             self.last_value = 0
             return self.escape_from_trap()
         
-        # Get perceived value (masks already-discovered items)
         perceived_val = self.get_perceived_value()
         
-        # GRADIENT FOLLOWING: If we sense something (item aura), chase it!
-        if perceived_val > 0 and abs(perceived_val - 0.35) > 0.03:  # Not wall aura
-            # Get valid moves first
+        # GRADIENT FOLLOWING with anti-collision and deadlock prevention
+        if perceived_val > 0 and abs(perceived_val - 0.35) > 0.03:
             valid_moves = self.get_valid_exploration_moves()
             
-            # If value dropped, we went the wrong way - turn back immediately!
-            if perceived_val < self.last_value and self.previous_move in self.inverse_directions:
+            # If value dropped significantly, we went the wrong way - backtrack!
+            if perceived_val < self.last_value - 0.05 and self.previous_move in self.inverse_directions:
                 inverse_dir = self.inverse_directions[self.previous_move]
-                # Only use inverse direction if it's valid (not blocked)
                 if inverse_dir in valid_moves:
-                    self.last_value = 0  # Reset to force new choice next turn
+                    self.last_value = 0
                     self.previous_move = inverse_dir
                     return inverse_dir
-                # If inverse is blocked, fall through to pick from valid_moves
             
-            # Value is increasing or stable - continue exploring
             self.last_value = perceived_val
             
             if valid_moves:
-                # Prefer unvisited cells
-                unvisited = [m for m in valid_moves 
-                            if (self.x + self.directions[m][0], 
-                                self.y + self.directions[m][1]) not in self.visited]
+                # Smart move selection: prioritize unexplored cells that avoid other agents
+                unvisited_safe = []
+                unvisited_any = []
+                visited_safe = []
                 
-                if unvisited:
-                    choice = random.choice(unvisited)
+                for m in valid_moves:
+                    nx, ny = self.x + self.directions[m][0], self.y + self.directions[m][1]
+                    is_visited = (nx, ny) in self.visited
+                    has_agent = (nx, ny) in self.other_agents_positions
+                    
+                    if not is_visited:
+                        if not has_agent:
+                            unvisited_safe.append(m)
+                        else:
+                            unvisited_any.append(m)
+                    else:
+                        if not has_agent:
+                            visited_safe.append(m)
+                
+                # Priority: unvisited + no agent > unvisited + agent > visited + no agent
+                if unvisited_safe:
+                    choice = random.choice(unvisited_safe)
+                elif visited_safe:
+                    choice = random.choice(visited_safe)
+                elif unvisited_any:
+                    # Only go toward another agent if we're VERY close to item (val > 0.5)
+                    if perceived_val > 0.5:
+                        choice = random.choice(unvisited_any)
+                    else:
+                        # Too risky, do normal exploration instead
+                        self.last_value = 0
+                        return self.explore_lane_fallback()
                 else:
                     choice = random.choice(valid_moves)
                 
                 self.previous_move = choice
                 return choice
         
-        # No gradient detected - reset last_value and do normal lane exploration
+        # No gradient - do normal lane exploration
+        return self.explore_lane_fallback()
+    
+    
+    def explore_lane_fallback(self):
+        """Normal lane-based exploration without gradient following"""
+        import random
         self.last_value = 0
         
+        # Navigate to current lane if not there
         if self.y != self.current_lane:
             d = self.navigate_to((self.x, self.current_lane))
             if d != STAND:
                 self.previous_move = d
                 return d
+            # Reached lane edge, move to next lane
             self.current_lane += self.lane_spacing
             if self.current_lane > self.my_zone_end:
-                self.current_lane = self.my_zone_start + 2
+                self.current_lane = self.my_zone_start + 1
         
+        # Move horizontally along lane
         next_x = self.x + self.lane_direction
         
-        if next_x < 0 or next_x >= self.w or self.is_blocked((next_x, self.y)):
+        # Check if next position is blocked or occupied by another agent
+        if (next_x < 0 or next_x >= self.w or 
+            self.is_blocked((next_x, self.y)) or
+            (next_x, self.y) in self.other_agents_positions):
+            # Reverse direction and move to next lane
             self.lane_direction *= -1
             self.current_lane += self.lane_spacing
             if self.current_lane > self.my_zone_end:
-                self.current_lane = self.my_zone_start + 2
+                # Wrap around within our zone
+                self.current_lane = self.my_zone_start + 1
                 if self.current_lane > self.my_zone_end:
                     self.current_lane = self.my_zone_start
             d = self.navigate_to((self.x, self.current_lane))
@@ -447,124 +432,152 @@ class Agent:
     
     
     def escape_from_trap(self):
-        """
-        Emergency escape when stuck inside blocked area (like L-shaped obstacle).
-        Use BFS to find the nearest cell that is NOT in blocked_cells and NOT a wall.
-        Only considers cardinal directions to avoid diagonal clipping through walls.
-        """
+        """Emergency escape using BFS with cardinal directions only"""
         queue = deque([(self.x, self.y, [])])
         seen = {(self.x, self.y)}
         
         while queue:
             cx, cy, path = queue.popleft()
             
-            # Only use cardinal directions for escape to avoid clipping
             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 nx, ny = cx + dx, cy + dy
                 
                 if 0 <= nx < self.w and 0 <= ny < self.h and (nx, ny) not in seen:
                     seen.add((nx, ny))
                     
-                    # Check if this cell is a potential safe escape destination
                     cell_val = self.exploration_map.get((nx, ny), None)
                     is_wall = cell_val is not None and (abs(cell_val - 0.35) < 0.02 or abs(cell_val - 1.0) < 0.01)
                     
-                    # If not blocked and not a wall, this is our escape route
-                    if (nx, ny) not in self.blocked_cells and not is_wall:
+                    # Found safe cell
+                    if ((nx, ny) not in self.blocked_cells and 
+                        not is_wall and 
+                        (nx, ny) not in self.other_agents_positions):
                         full_path = path + [(nx, ny)]
                         if full_path:
                             return self.direction_to(full_path[0])
                     
-                    # Continue searching even through blocked cells to find exit
                     queue.append((nx, ny, path + [(nx, ny)]))
         
-        # No escape found - try any cardinal direction that's in bounds
+        # Last resort
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
             nx, ny = self.x + dx, self.y + dy
             if 0 <= nx < self.w and 0 <= ny < self.h:
-                return self.direction_to((nx, ny))
+                if (nx, ny) not in self.other_agents_positions:
+                    return self.direction_to((nx, ny))
         
         return STAND
     
     
     def navigate_to(self, target):
+        """FIXED: Navigate to target, allowing exploration through safe/unexplored areas"""
         if not target or (self.x, self.y) == target:
             return STAND
         
-        # First, try to find a path using only KNOWN (visited) cells
+        # Phase 1: Try to find path using explored OR unexplored cells (but avoiding known obstacles)
         queue = deque([(self.x, self.y, [])])
         seen = {(self.x, self.y)}
+        max_iterations = self.w * self.h
+        iterations = 0
         
-        while queue:
+        while queue and iterations < max_iterations:
+            iterations += 1
             cx, cy, path = queue.popleft()
             
+            # Try all 8 directions
             for dx, dy in [(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,-1), (-1,1), (1,1)]:
                 nx, ny = cx + dx, cy + dy
                 
+                # Out of bounds
                 if not (0 <= nx < self.w and 0 <= ny < self.h):
                     continue
                 
+                # Already visited in this BFS
                 if (nx, ny) in seen:
                     continue
                 seen.add((nx, ny))
                 
-                # Check if we reached the target
+                # Reached target!
                 if (nx, ny) == target:
-                    # Target is allowed even if not in exploration_map (it's an item)
                     full_path = path + [(nx, ny)]
                     if full_path:
                         return self.direction_to(full_path[0])
                     return STAND
                 
-                # Check if cell is blocked
-                if self.is_blocked((nx, ny)):
-                    continue
-                
-                # Check cell value for wall aura
+                # Get cell value (None if unexplored)
                 cell_val = self.exploration_map.get((nx, ny), None)
                 
-                # Skip cells we haven't visited yet (unknown territory)
-                # This prevents pathing through walls we haven't discovered
-                if cell_val is None:
+                # ALLOW unexplored cells when navigating to broadcast locations
+                # Only SKIP cells that we KNOW are obstacles
+                if cell_val is not None:
+                    # Check if it's a wall (0.35 aura or confirmed blocked)
+                    if abs(cell_val - 0.35) < 0.03:
+                        self.blocked_cells.add((nx, ny))
+                        continue
+                    
+                    if (nx, ny) in self.blocked_cells and (nx, ny) not in self.item_cells:
+                        continue
+                
+                # Skip if another agent is there
+                if (nx, ny) in self.other_agents_positions:
                     continue
                 
-                if abs(cell_val - 0.35) < 0.03:
-                    self.blocked_cells.add((nx, ny))
-                    continue
-                
-                # For diagonal moves, check that we can pass through
+                # Check diagonal movement doesn't clip through walls
                 if abs(dx) == 1 and abs(dy) == 1:
                     side1 = (cx + dx, cy)
                     side2 = (cx, cy + dy)
-                    if self.is_blocked(side1) or self.is_blocked(side2):
-                        continue
+                    
+                    # Both sides must be safe
                     side1_val = self.exploration_map.get(side1, None)
                     side2_val = self.exploration_map.get(side2, None)
-                    if side1_val is None or side2_val is None:
+                    
+                    # Only block diagonal if we KNOW the sides are walls
+                    if side1_val is not None and abs(side1_val - 0.35) < 0.03:
                         continue
-                    if abs(side1_val - 0.35) < 0.03 or abs(side2_val - 0.35) < 0.03:
+                    if side2_val is not None and abs(side2_val - 0.35) < 0.03:
+                        continue
+                    
+                    if self.is_blocked(side1) or self.is_blocked(side2):
                         continue
                 
+                # Safe to add to queue (either explored-safe or unexplored)
                 queue.append((nx, ny, path + [(nx, ny)]))
         
-        # No known path found - move toward target by exploring
-        # Find best valid move that gets us closer to target
+        # Phase 2: No safe path found - use greedy exploration toward target
+        # This will make agent explore safely to discover path
         valid_moves = self.get_valid_exploration_moves()
+        
         if valid_moves:
             target_x, target_y = target
             best_move = None
             best_dist = float('inf')
+            
             for move in valid_moves:
                 dx, dy = self.directions[move]
                 nx, ny = self.x + dx, self.y + dy
+                
+                # Skip if another agent is there
+                if (nx, ny) in self.other_agents_positions:
+                    continue
+                
+                # Prefer unexplored cells when no path exists
+                # This helps discover new routes
+                cell_val = self.exploration_map.get((nx, ny), None)
+                
+                # Calculate distance to target
                 dist = abs(nx - target_x) + abs(ny - target_y)
+                
+                # Bonus for unexplored cells (they might reveal a path)
+                if cell_val is None:
+                    dist -= 0.5
+                
                 if dist < best_dist:
                     best_dist = dist
                     best_move = move
+            
             if best_move:
                 return best_move
         
-        # Truly stuck - try escape
+        # Phase 3: Completely stuck - emergency escape
         return self.escape_from_trap()
     
     
@@ -582,8 +595,6 @@ class Agent:
         pos = (self.x, self.y)
         
         if owner is None:
-            # This is a WALL, not an item - block just this cell
-            pos = (self.x, self.y)
             if pos not in self.item_cells:
                 self.blocked_cells.add(pos)
             return
@@ -596,14 +607,14 @@ class Agent:
             if owner == self.agent_id:
                 self.my_key_collected = True
                 self.my_key_location = pos
-                print(f"Agent {self.agent_id}: *** GOT MY KEY ***")
+                print(f"Agent {self.agent_id}: *** GOT MY KEY at {pos} ***")
             self.broadcast_item(owner, item_type, pos)
                 
         elif item_type == BOX_TYPE:
             self.all_boxes[owner] = pos
             if owner == self.agent_id:
                 self.my_box_location = pos
-                print(f"Agent {self.agent_id}: *** FOUND MY BOX ***")
+                print(f"Agent {self.agent_id}: *** FOUND MY BOX at {pos} ***")
             self.broadcast_item(owner, item_type, pos)
     
     
@@ -633,13 +644,13 @@ class Agent:
             self.all_keys[owner] = pos
             if owner == self.agent_id and not self.my_key_location:
                 self.my_key_location = pos
-                print(f"Agent {self.agent_id}: Key location: {pos}")
+                print(f"Agent {self.agent_id}: Key location broadcast: {pos}")
                 
         elif msg_type == BOX_DISCOVERED:
             self.all_boxes[owner] = pos
             if owner == self.agent_id and not self.my_box_location:
                 self.my_box_location = pos
-                print(f"Agent {self.agent_id}: Box location: {pos}")
+                print(f"Agent {self.agent_id}: Box location broadcast: {pos}")
                 
         elif msg_type == COMPLETED:
             pass
@@ -657,7 +668,7 @@ class Agent:
     
     
     def run(self):
-        print(f"Agent {self.agent_id}: Starting...")
+        print(f"Agent {self.agent_id}: Starting exploration...")
         
         while not self.completed and self.running:
             try:
@@ -666,14 +677,19 @@ class Agent:
                 with self.lock:
                     pos = (self.x, self.y)
                 
+                # Priority 1: Get my key
                 if self.need_key():
                     if pos == self.my_key_location:
                         self.check_cell()
                         sleep(0.2)
                     else:
+                        # Update positions more frequently when navigating to key
+                        self.network.send({"header": GET_DATA})
+                        sleep(0.05)
                         d = self.navigate_to(self.my_key_location)
                         self.network.send({"header": MOVE, "direction": d})
                 
+                # Priority 2: Go to my box when ready
                 elif self.ready_for_box():
                     if pos == self.my_box_location:
                         self.completed = True
@@ -683,17 +699,21 @@ class Agent:
                             "position": pos,
                             "owner": self.agent_id
                         })
-                        print(f"Agent {self.agent_id}: *** MISSION COMPLETE! *** Visited: {len(self.visited)}")
+                        print(f"Agent {self.agent_id}: *** MISSION COMPLETE! *** Visited {len(self.visited)} cells")
                         break
                     else:
+                        # Update positions more frequently when navigating to box
+                        self.network.send({"header": GET_DATA})
+                        sleep(0.05)
                         d = self.navigate_to(self.my_box_location)
                         self.network.send({"header": MOVE, "direction": d})
                 
+                # Priority 3: Explore
                 else:
                     d = self.explore_lane()
                     self.network.send({"header": MOVE, "direction": d})
                 
-                sleep(0.1)
+                sleep(0.08)  # Slightly faster for better responsiveness
                 
             except Exception as e:
                 sleep(0.1)
