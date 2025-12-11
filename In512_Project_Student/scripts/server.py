@@ -63,6 +63,13 @@ class Server:
                 msg = pickle.loads(conn.recv(1024))
                 if msg["header"] == BROADCAST_MSG:
                     msg["sender"] = client_id
+                    # Record completion statistics
+                    if msg.get("Msg type") == COMPLETED:
+                        visited_count = msg.get("visited_count", 0)
+                        owner = msg.get("owner")
+                        if owner is not None:
+                            self.game.record_completion(owner, visited_count)
+                            print(f"Agent {owner} completed with {visited_count} visited cells")
                     self.send_to_all(conn, msg)
                 else:
                     reply = self.game.process(msg, client_id)
