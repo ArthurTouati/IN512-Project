@@ -469,81 +469,21 @@ class Agent:
     
     
     def navigate_to(self, target):
-        """FIXED: Navigate to target, allowing exploration through safe/unexplored areas"""
+        """FIXED: Navigate to target with smart pathfinding that prioritizes explored areas"""
         if not target or (self.x, self.y) == target:
             return STAND
         
-        # Phase 1: Try to find path using explored OR unexplored cells (but avoiding known obstacles)
-        queue = deque([(self.x, self.y, [])])
-        seen = {(self.x, self.y)}
-        max_iterations = self.w * self.h
-        iterations = 0
+        # Phase 1: Try to find path using ONLY explored safe cells
+        path = self._find_path_explored_only(target)
+        if path:
+            return self.direction_to(path[0])
         
-        while queue and iterations < max_iterations:
-            iterations += 1
-            cx, cy, path = queue.popleft()
-            
-            # Try all 8 directions
-            for dx, dy in [(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,-1), (-1,1), (1,1)]:
-                nx, ny = cx + dx, cy + dy
-                
-                # Out of bounds
-                if not (0 <= nx < self.w and 0 <= ny < self.h):
-                    continue
-                
-                # Already visited in this BFS
-                if (nx, ny) in seen:
-                    continue
-                seen.add((nx, ny))
-                
-                # Reached target!
-                if (nx, ny) == target:
-                    full_path = path + [(nx, ny)]
-                    if full_path:
-                        return self.direction_to(full_path[0])
-                    return STAND
-                
-                # Get cell value (None if unexplored)
-                cell_val = self.exploration_map.get((nx, ny), None)
-                
-                # ALLOW unexplored cells when navigating to broadcast locations
-                # Only SKIP cells that we KNOW are obstacles
-                if cell_val is not None:
-                    # Check if it's a wall (0.35 aura or confirmed blocked)
-                    if abs(cell_val - 0.35) < 0.03:
-                        self.blocked_cells.add((nx, ny))
-                        continue
-                    
-                    if (nx, ny) in self.blocked_cells and (nx, ny) not in self.item_cells:
-                        continue
-                
-                # Skip if another agent is there
-                if (nx, ny) in self.other_agents_positions:
-                    continue
-                
-                # Check diagonal movement doesn't clip through walls
-                if abs(dx) == 1 and abs(dy) == 1:
-                    side1 = (cx + dx, cy)
-                    side2 = (cx, cy + dy)
-                    
-                    # Both sides must be safe
-                    side1_val = self.exploration_map.get(side1, None)
-                    side2_val = self.exploration_map.get(side2, None)
-                    
-                    # Only block diagonal if we KNOW the sides are walls
-                    if side1_val is not None and abs(side1_val - 0.35) < 0.03:
-                        continue
-                    if side2_val is not None and abs(side2_val - 0.35) < 0.03:
-                        continue
-                    
-                    if self.is_blocked(side1) or self.is_blocked(side2):
-                        continue
-                
-                # Safe to add to queue (either explored-safe or unexplored)
-                queue.append((nx, ny, path + [(nx, ny)]))
+        # Phase 2: If no explored path exists, allow unexplored cells (for broadcast locations)
+        path = self._find_path_with_unexplored(target)
+        if path:
+            return self.direction_to(path[0])
         
-        # Phase 2: No safe path found - use greedy exploration toward target
-        # This will make agent explore safely to discover path
+        # Phase 3: No path found - use greedy exploration toward target
         valid_moves = self.get_valid_exploration_moves()
         
         if valid_moves:
@@ -560,7 +500,6 @@ class Agent:
                     continue
                 
                 # Prefer unexplored cells when no path exists
-                # This helps discover new routes
                 cell_val = self.exploration_map.get((nx, ny), None)
                 
                 # Calculate distance to target
@@ -577,8 +516,123 @@ class Agent:
             if best_move:
                 return best_move
         
-        # Phase 3: Completely stuck - emergency escape
+        # Phase 4: Completely stuck - emergency escape
         return self.escape_from_trap()
+    
+    
+    def _find_path_explored_only(self, target):
+        """Find path using only explored safe cells"""
+        queue = deque([(self.x, self.y, [])])
+        seen = {(self.x, self.y)}
+        max_iterations = self.w * self.h
+        iterations = 0
+        
+        while queue and iterations < max_iterations:
+            iterations += 1
+            cx, cy, path = queue.popleft()
+            
+            for dx, dy in [(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,-1), (-1,1), (1,1)]:
+                nx, ny = cx + dx, cy + dy
+                
+                if not (0 <= nx < self.w and 0 <= ny < self.h):
+                    continue
+                
+                if (nx, ny) in seen:
+                    continue
+                seen.add((nx, ny))
+                
+                if (nx, ny) == target:
+                    return path + [(nx, ny)]
+                
+                # ONLY use explored cells
+                cell_val = self.exploration_map.get((nx, ny), None)
+                if cell_val is None:
+                    continue
+                
+                # Skip walls
+                if abs(cell_val - 0.35) < 0.03:
+                    self.blocked_cells.add((nx, ny))
+                    continue
+                
+                if (nx, ny) in self.blocked_cells and (nx, ny) not in self.item_cells:
+                    continue
+                
+                if (nx, ny) in self.other_agents_positions:
+                    continue
+                
+                # Check diagonal clipping
+                if abs(dx) == 1 and abs(dy) == 1:
+                    side1 = (cx + dx, cy)
+                    side2 = (cx, cy + dy)
+                    side1_val = self.exploration_map.get(side1, None)
+                    side2_val = self.exploration_map.get(side2, None)
+                    
+                    if side1_val is None or side2_val is None:
+                        continue
+                    if abs(side1_val - 0.35) < 0.03 or abs(side2_val - 0.35) < 0.03:
+                        continue
+                    if self.is_blocked(side1) or self.is_blocked(side2):
+                        continue
+                
+                queue.append((nx, ny, path + [(nx, ny)]))
+        
+        return None
+    
+    
+    def _find_path_with_unexplored(self, target):
+        """Find path allowing unexplored cells (for broadcast locations)"""
+        queue = deque([(self.x, self.y, [])])
+        seen = {(self.x, self.y)}
+        max_iterations = self.w * self.h
+        iterations = 0
+        
+        while queue and iterations < max_iterations:
+            iterations += 1
+            cx, cy, path = queue.popleft()
+            
+            for dx, dy in [(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,-1), (-1,1), (1,1)]:
+                nx, ny = cx + dx, cy + dy
+                
+                if not (0 <= nx < self.w and 0 <= ny < self.h):
+                    continue
+                
+                if (nx, ny) in seen:
+                    continue
+                seen.add((nx, ny))
+                
+                if (nx, ny) == target:
+                    return path + [(nx, ny)]
+                
+                # Allow unexplored, but skip KNOWN obstacles
+                cell_val = self.exploration_map.get((nx, ny), None)
+                if cell_val is not None:
+                    if abs(cell_val - 0.35) < 0.03:
+                        self.blocked_cells.add((nx, ny))
+                        continue
+                    if (nx, ny) in self.blocked_cells and (nx, ny) not in self.item_cells:
+                        continue
+                
+                if (nx, ny) in self.other_agents_positions:
+                    continue
+                
+                # Be more cautious with diagonals through unexplored
+                if abs(dx) == 1 and abs(dy) == 1:
+                    side1 = (cx + dx, cy)
+                    side2 = (cx, cy + dy)
+                    side1_val = self.exploration_map.get(side1, None)
+                    side2_val = self.exploration_map.get(side2, None)
+                    
+                    # Block diagonal if we KNOW sides are walls
+                    if side1_val is not None and abs(side1_val - 0.35) < 0.03:
+                        continue
+                    if side2_val is not None and abs(side2_val - 0.35) < 0.03:
+                        continue
+                    if self.is_blocked(side1) or self.is_blocked(side2):
+                        continue
+                
+                queue.append((nx, ny, path + [(nx, ny)]))
+        
+        return None
     
     
     def check_cell(self):
@@ -697,9 +751,13 @@ class Agent:
                             "header": BROADCAST_MSG,
                             "Msg type": COMPLETED,
                             "position": pos,
-                            "owner": self.agent_id
+                            "owner": self.agent_id,
+                            "visited_count": len(self.visited)
                         })
                         print(f"Agent {self.agent_id}: *** MISSION COMPLETE! *** Visited {len(self.visited)} cells")
+                        print(f"Agent {self.agent_id}: Waiting to display final rankings...")
+                        # Don't exit immediately - give GUI time to display ranking
+                        sleep(10)
                         break
                     else:
                         # Update positions more frequently when navigating to box

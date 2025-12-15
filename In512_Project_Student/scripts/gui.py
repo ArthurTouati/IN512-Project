@@ -73,6 +73,73 @@ class GUI:
         except Exception:
             pass
     
+    
+    def draw_ranking(self):
+        """Draw ranking overlay when all agents complete"""
+        print("[GUI] Drawing ranking overlay...")
+        
+        # Get ranking data
+        ranking = self.game.get_ranking()
+        if not ranking:
+            print("[GUI] Warning: No ranking data available!")
+            return
+        
+        print(f"[GUI] Ranking data: {ranking}")
+        
+        # Semi-transparent overlay
+        overlay = pygame.Surface(self.screen_res)
+        overlay.set_alpha(220)
+        overlay.fill((30, 30, 30))
+        self.screen.blit(overlay, (0, 0))
+        
+        # Title
+        title_font = pygame.font.SysFont("Arial", self.cell_size, True)
+        title = title_font.render("Mission Complete - Agent Ranking", True, (255, 255, 255))
+        title_rect = title.get_rect(center=(self.screen_res[0]//2, self.cell_size * 2))
+        self.screen.blit(title, title_rect)
+        
+        # Display ranking
+        rank_font = pygame.font.SysFont("Arial", self.cell_size//2, True)
+        y_offset = self.cell_size * 4
+        total_visited = 0
+        grid_cells = self.w * self.h
+        
+        for rank, entry in enumerate(ranking, 1):
+            agent_id = entry["agent_id"]
+            visited_count = entry["visited_count"]
+            total_visited += visited_count
+            
+            # Get agent color
+            agent_color = self.game.agents[agent_id].color if agent_id < len(self.game.agents) else (255, 255, 255)
+            
+            # Calculate percentage of grid visited
+            percentage = (visited_count / grid_cells) * 100 if grid_cells > 0 else 0
+            
+            # Render ranking line with percentage
+            rank_text = f"#{rank}  Agent {agent_id + 1}: {visited_count} cells visited ({percentage:.1f}% of grid)"
+            text_surface = rank_font.render(rank_text, True, agent_color)
+            text_rect = text_surface.get_rect(center=(self.screen_res[0]//2, y_offset))
+            self.screen.blit(text_surface, text_rect)
+            
+            y_offset += self.cell_size
+        
+        # Display total
+        y_offset += self.cell_size
+        total_font = pygame.font.SysFont("Arial", self.cell_size//2, True)
+        total_percentage = (total_visited / grid_cells) * 100 if grid_cells > 0 else 0
+        total_text = f"Total Cells Visited: {total_visited} ({total_percentage:.1f}% of grid)"
+        total_surface = total_font.render(total_text, True, (255, 215, 0))  # Gold color
+        total_rect = total_surface.get_rect(center=(self.screen_res[0]//2, y_offset))
+        self.screen.blit(total_surface, total_rect)
+        
+        # Display total number of cells in grid
+        y_offset += self.cell_size
+        grid_cells = self.w * self.h
+        grid_text = f"Total Grid Cells: {grid_cells} ({self.w} × {self.h})"
+        grid_surface = total_font.render(grid_text, True, (135, 206, 250))  # Light blue color
+        grid_rect = grid_surface.get_rect(center=(self.screen_res[0]//2, y_offset))
+        self.screen.blit(grid_surface, grid_rect)
+    
 
     def draw(self):
         self.screen.fill(BG_COLOR)
@@ -105,6 +172,9 @@ class GUI:
         for i in range(self.game.nb_agents * NB_WALLS):
             pygame.draw.rect(self.screen, BLACK, (self.game.walls[i].x*self.cell_size, self.game.walls[i].y*self.cell_size, self.cell_size, self.cell_size), width=3)
             self.screen.blit(self.walls[i], self.walls[i].get_rect(topleft=(self.game.walls[i].x*self.cell_size, self.game.walls[i].y*self.cell_size)))
-            
+        
+        # Draw ranking overlay if all agents completed
+        if self.game.all_agents_completed():
+            self.draw_ranking()
 
         pygame.display.update()

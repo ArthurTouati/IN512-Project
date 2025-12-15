@@ -21,6 +21,7 @@ class Game:
         self.agent_id = 0
         self.moves = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)]
         self.agent_paths = [None]*nb_agents
+        self.agent_stats = {}  # Track completion statistics {agent_id: {"visited_count": int}}
         self.load_map(map_id)
         self.gui = GUI(self)
         
@@ -121,6 +122,33 @@ class Game:
         for i, box in enumerate(self.boxes):    #check if it's a box
             if (self.agents[agent_id].x == box.x) and (self.agents[agent_id].y == box.y):
                 return  {"sender": GAME_ID, "header": GET_ITEM_OWNER, "owner": i, "type": BOX_TYPE}
+    
+    
+    def record_completion(self, agent_id, visited_count):
+        """Record agent completion statistics"""
+        self.agent_stats[agent_id] = {"visited_count": visited_count}
+        print(f"[GAME] Recorded completion for Agent {agent_id}: {visited_count} cells. Total completed: {len(self.agent_stats)}/{self.nb_agents}")
+    
+    
+    def all_agents_completed(self):
+        """Check if all agents have completed their missions"""
+        completed = len(self.agent_stats) >= self.nb_agents
+        if completed and len(self.agent_stats) == self.nb_agents:
+            print(f"[GAME] All {self.nb_agents} agents completed! Stats: {self.agent_stats}")
+        return completed
+    
+    
+    def get_ranking(self):
+        """Get agent ranking sorted by visited cells (fewest first)"""
+        ranking = []
+        for agent_id, stats in self.agent_stats.items():
+            ranking.append({
+                "agent_id": agent_id,
+                "visited_count": stats["visited_count"]
+            })
+        # Sort by visited count (ascending - fewest cells = best)
+        ranking.sort(key=lambda x: x["visited_count"])
+        return ranking
 
 
 class Agent:
